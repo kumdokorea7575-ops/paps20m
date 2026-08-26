@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>수행평가 자동채점 - 20m 왕복달리기 / 제자리멀리뛰기</title>
 <link rel="manifest" href="manifest.json">
-<link rel="icon" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="심화체육">
 <meta name="theme-color" content="#1E3350">
@@ -58,6 +58,13 @@
     grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));
     gap:10px;
     margin-bottom:20px;
+  }
+  @media (max-width: 480px){
+    .roster{ grid-template-columns:repeat(5, 1fr); gap:5px; }
+    .roster-card{ padding:8px 3px; min-height:64px; border-radius:8px; }
+    .roster-card .name{ font-size:11px; }
+    .roster-card .sub{ font-size:8.5px; margin-top:2px; }
+    .badge{ font-size:8.5px; padding:2px 4px; margin-top:4px; }
   }
   .roster-card{
     border:1px solid var(--border);
