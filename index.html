@@ -624,10 +624,27 @@ function render(){
   renderPanel();
 }
 
+const SYNCED_KEY = "paps_20m_synced_ids_v1";
+
+function hasAnyRecord(row){
+  const filled = v => v !== "" && v !== null && v !== undefined;
+  return Object.values(row.sh).some(filled) || Object.values(row.jp).some(filled);
+}
+
+function loadSyncedIds(){
+  try{ return new Set(JSON.parse(localStorage.getItem(SYNCED_KEY) || "[]")); }
+  catch(err){ return new Set(); }
+}
+
 function syncToSheet(){
   if(!SHEET_WEBHOOK_URL) return;
   try{
-    const rows = students.map(row => {
+    const synced = loadSyncedIds();
+    const targets = students.filter(row => hasAnyRecord(row) || synced.has(row.id));
+    if(targets.length === 0) return;
+    targets.forEach(row => { if(hasAnyRecord(row)) synced.add(row.id); });
+    try{ localStorage.setItem(SYNCED_KEY, JSON.stringify([...synced])); }catch(err){}
+    const rows = targets.map(row => {
       const s = computeSummary(row);
       return {
         name: row.name, gender: row.gender,
