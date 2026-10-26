@@ -167,6 +167,10 @@ html{overflow-x:hidden;width:100%;}
     <p>학생 이름을 탭하면 입력 패널이 열립니다. 각 종목은 1차~10차까지 회차를 선택해 기록을 입력할 수 있고, 입력 즉시 그 회차의 배점이 표시됩니다. 잘못 입력했다면 "이 차시 초기화"로 해당 회차만 지울 수 있습니다. 모든 회차 중 가장 좋은 기록이 최종 배점으로 자동 반영됩니다. 기록은 지금 사용 중인 이 기기·브라우저에만 저장되며 다른 선생님과 공유되지 않습니다.</p>
   </div>
 
+  <div id="inAppWarn" hidden style="background:var(--amber-bg);color:var(--amber-text);border:1px solid var(--amber-border);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;line-height:1.6;">
+    카카오톡·네이버 같은 앱 안에서 열린 화면입니다. 여기에 입력한 기록은 크롬 같은 일반 브라우저와 따로 저장되어 사라질 수 있어요. 메뉴(⋮ 또는 ⋯)에서 <b>다른 브라우저로 열기</b>를 선택해 크롬에서 사용해 주세요.
+  </div>
+
   <div class="toolbar">
     <span class="save-indicator"><span class="dot"></span><span id="saveText">저장됨</span></span>
     <button id="addBtn">학생 추가</button>
@@ -208,6 +212,10 @@ let students = [];
 let selectedId = null;
 let uiState = {};
 let saveTimer = null;
+let dirty = false;
+let syncPending = false;
+let syncInFlight = false;
+let syncVersion = 0;
 
 const sw = { running:false, startTs:0, elapsed:0, targetId:null, targetRound:1, msg:"", raf:0 };
 
@@ -649,11 +657,12 @@ function loadSyncedIds(){
 }
 
 function syncToSheet(){
-  if(!SHEET_WEBHOOK_URL) return;
+  if(!SHEET_WEBHOOK_URL){ syncPending = false; return; }
+  if(syncInFlight) return;
   try{
     const synced = loadSyncedIds();
     const targets = students.filter(row => hasAnyRecord(row) || synced.has(row.id));
-    if(targets.length === 0) return;
+    if(targets.length === 0){ syncPending = false; return; }
     targets.forEach(row => { if(hasAnyRecord(row)) synced.add(row.id); });
     try{ localStorage.setItem(SYNCED_KEY, JSON.stringify([...synced])); }catch(err){}
     const rows = targets.map(row => {
@@ -664,36 +673,76 @@ function syncToSheet(){
         shScore: s.shScore, jpBest: s.jpBest, jpScore: s.jpScore, total: s.total
       };
     });
+    const version = syncVersion;
+    syncInFlight = true;
     fetch(SHEET_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ rows })
-    }).catch(() => {});
-  }catch(err){}
+    }).then(r => {
+      if(r && r.ok && version === syncVersion) syncPending = false;
+      syncInFlight = false;
+      if(syncPending && version !== syncVersion) syncToSheet();
+    }).catch(() => { syncInFlight = false; });
+  }catch(err){ syncInFlight = false; }
+}
+
+function savedLabel(){
+  return "저장됨 (기록 " + students.filter(hasAnyRecord).length + "명)";
 }
 
 function flushSave(){
   clearTimeout(saveTimer);
   const indicator = document.getElementById("saveText");
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(students));
-    if(indicator) indicator.textContent = "저장됨";
-    syncToSheet();
-  }catch(err){
-    if(indicator) indicator.textContent = "저장 실패";
+  if(dirty){
+    try{
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(students));
+      dirty = false;
+      syncPending = true;
+      syncVersion++;
+      if(indicator) indicator.textContent = savedLabel();
+    }catch(err){
+      if(indicator) indicator.textContent = "저장 실패";
+      return;
+    }
   }
+  if(syncPending) syncToSheet();
 }
 
 function scheduleSave(){
   const indicator = document.getElementById("saveText");
+  dirty = true;
   if(indicator) indicator.textContent = "저장 중...";
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 200);
 }
 
+function reloadFromStorage(){
+  if(dirty || sw.running) return;
+  const active = document.activeElement;
+  if(active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return;
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return;
+    const fresh = JSON.parse(raw);
+    if(!Array.isArray(fresh)) return;
+    students = normalizeStudents(fresh);
+    if(selectedId && !students.some(s => s.id === selectedId)) selectedId = null;
+    render();
+    const indicator = document.getElementById("saveText");
+    if(indicator) indicator.textContent = savedLabel();
+  }catch(err){}
+}
+
+window.addEventListener("storage", e => {
+  if(e.key === STORAGE_KEY) reloadFromStorage();
+});
+
 document.addEventListener("visibilitychange", () => {
   if(document.visibilityState === "hidden"){
     flushSave();
+  }else{
+    reloadFromStorage();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -703,25 +752,36 @@ window.addEventListener("blur", () => {
   flushSave();
 });
 
+function normalizeStudents(list){
+  list.forEach(s => {
+    if(!s.sh) s.sh = emptyRounds();
+    if(!s.jp) s.jp = emptyRounds();
+    if(!s.gender && DEFAULT_NAMES.includes(s.name)){
+      s.gender = FEMALE_NAMES.has(s.name) ? "여" : "남";
+    }
+  });
+  return list;
+}
+
 function loadData(){
+  let raw = null;
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
+    raw = localStorage.getItem(STORAGE_KEY);
     if(raw){
-      students = JSON.parse(raw);
-      students.forEach(s => {
-        if(!s.sh) s.sh = emptyRounds();
-        if(!s.jp) s.jp = emptyRounds();
-        if(!s.gender && DEFAULT_NAMES.includes(s.name)){
-          s.gender = FEMALE_NAMES.has(s.name) ? "여" : "남";
-        }
-      });
+      students = normalizeStudents(JSON.parse(raw));
     } else {
       students = defaultStudents();
     }
   }catch(err){
+    if(raw){
+      try{ localStorage.setItem(STORAGE_KEY + "_unreadable_backup", raw); }catch(e){}
+    }
     students = defaultStudents();
   }
   render();
+  const indicator = document.getElementById("saveText");
+  if(indicator) indicator.textContent = savedLabel();
+  try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(err){}
 }
 
 document.getElementById("addBtn").addEventListener("click", () => {
@@ -816,7 +876,11 @@ document.getElementById("importCloseBtn").addEventListener("click", () => {
 document.getElementById("importRunBtn").addEventListener("click", runSheetImport);
 
 document.getElementById("resetAllBtn").addEventListener("click", () => {
-  if(confirm("모든 학생의 성별/기록을 초기화할까요? (이름은 유지됩니다)")){
+  const recorded = students.filter(hasAnyRecord).length;
+  const warn = recorded > 0
+    ? "기록이 있는 " + recorded + "명을 포함해 모든 학생의 성별/기록을 초기화합니다.\n구글시트에도 빈 값으로 반영되며 되돌릴 수 없습니다.\n\n정말 초기화할까요?"
+    : "모든 학생의 성별/기록을 초기화할까요? (이름은 유지됩니다)";
+  if(confirm(warn)){
     students = students.map(r => ({ id: r.id, name: r.name, gender: "", sh: emptyRounds(), jp: emptyRounds() }));
     uiState = {};
     render();
@@ -836,6 +900,10 @@ function checkRestoreLink(){
     return;
   }
   runSheetImport();
+}
+
+if(/KAKAOTALK|NAVER\(|Instagram|FBAN|FBAV|DaumApps|Line\//i.test(navigator.userAgent)){
+  document.getElementById("inAppWarn").hidden = false;
 }
 
 loadData();
