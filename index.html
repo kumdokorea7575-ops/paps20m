@@ -147,6 +147,17 @@ html{overflow-x:hidden;width:100%;}
   .panel-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;}
   .legend{font-size:12.5px;color:var(--text-mute);line-height:1.8;margin-top:6px;}
   .footer-note{font-size:12.5px;color:var(--text-mute);text-align:center;margin-top:22px;}
+  .stopwatch{background:#F3F6FB;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px;text-align:center;}
+  .sw-title{font-size:12.5px;color:var(--text-mute);margin-bottom:6px;}
+  .sw-display{font-size:52px;font-weight:700;color:var(--navy);font-variant-numeric:tabular-nums;line-height:1.1;}
+  .sw-display small{font-size:18px;font-weight:600;margin-left:4px;color:var(--text-mute);}
+  .sw-buttons{display:flex;gap:8px;margin-top:10px;}
+  .sw-buttons button{min-height:60px;}
+  .sw-buttons .sw-main{flex:1;font-size:20px;font-weight:700;background:var(--navy);color:#fff;border-color:var(--navy);}
+  .sw-buttons .sw-main.running{background:var(--red-text);border-color:var(--red-text);}
+  .sw-buttons .sw-reset{width:84px;}
+  .sw-msg{font-size:13px;color:var(--green-text);min-height:18px;margin-top:8px;}
+  button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed;}
 </style>
 </head>
 <body>
@@ -186,6 +197,61 @@ let students = [];
 let selectedId = null;
 let uiState = {};
 let saveTimer = null;
+
+const sw = { running:false, startTs:0, elapsed:0, targetId:null, targetRound:1, msg:"", raf:0 };
+
+function swElapsedMs(){ return sw.running ? performance.now() - sw.startTs : sw.elapsed; }
+
+function swTick(){
+  const el = document.getElementById("swDisplay");
+  if(el) el.textContent = (swElapsedMs() / 1000).toFixed(2);
+  if(sw.running) sw.raf = requestAnimationFrame(swTick);
+}
+
+function swStart(row, round){
+  sw.running = true;
+  sw.startTs = performance.now();
+  sw.elapsed = 0;
+  sw.targetId = row.id;
+  sw.targetRound = round;
+  sw.msg = "";
+  renderPanel();
+  cancelAnimationFrame(sw.raf);
+  swTick();
+}
+
+function swStop(){
+  sw.elapsed = performance.now() - sw.startTs;
+  sw.running = false;
+  cancelAnimationFrame(sw.raf);
+  const row = students.find(s => s.id === sw.targetId);
+  const secs = (sw.elapsed / 1000).toFixed(2);
+  if(row){
+    const prev = row.sh[sw.targetRound];
+    const hasPrev = prev !== "" && prev !== undefined;
+    if(hasPrev && !confirm(sw.targetRound + "차에 이미 " + prev + "초가 입력되어 있습니다.\n" + secs + "초로 덮어쓸까요?")){
+      sw.msg = "저장하지 않았습니다 (" + secs + "초)";
+    } else {
+      row.sh[sw.targetRound] = secs;
+      scheduleSave();
+      sw.msg = sw.targetRound + "차 " + secs + "초 저장됨";
+    }
+  }
+  renderPanel();
+}
+
+function swReset(){
+  sw.running = false;
+  cancelAnimationFrame(sw.raf);
+  sw.elapsed = 0;
+  sw.msg = "";
+  renderPanel();
+}
+
+function applySwLock(){
+  document.getElementById("addBtn").disabled = sw.running;
+  document.getElementById("resetAllBtn").disabled = sw.running;
+}
 
 function uid(){ return "s" + Math.random().toString(36).slice(2, 10); }
 function emptyRounds(){
@@ -384,6 +450,7 @@ function refreshPanelComputed(){
 function renderPanel(){
   const host = document.getElementById("panelHost");
   host.innerHTML = "";
+  applySwLock();
   if(!selectedId) return;
   const row = students.find(s => s.id === selectedId);
   if(!row) return;
@@ -395,11 +462,16 @@ function renderPanel(){
   const shCurScore = row.gender && shCurVal !== "" ? scoreShuttle(row.gender, parseFloat(shCurVal)) : null;
   const jpCurScore = row.gender && jpCurVal !== "" ? scoreJump(row.gender, parseFloat(jpCurVal)) : null;
 
+  const swHere = sw.targetId === row.id && sw.targetRound === ui.shRound;
+  const swText = (swHere ? swElapsedMs() / 1000 : 0).toFixed(2);
+  const swMsg = swHere ? sw.msg : "";
+  const lock = sw.running ? "disabled" : "";
+
   const panel = document.createElement("div");
   panel.className = "panel";
   panel.innerHTML = `
     <div style="margin-bottom:14px;">
-      <button type="button" id="backBtn" class="small">← 목록으로</button>
+      <button type="button" id="backBtn" class="small" ${lock}>← 목록으로</button>
     </div>
     <div class="panel-head">
       <input type="text" id="nameInput" value="${row.name.replace(/"/g,'&quot;')}" placeholder="이름 입력">
@@ -414,14 +486,23 @@ function renderPanel(){
     <div class="event">
       <h3>20m 왕복달리기 (초)</h3>
       <div class="round-nav">
-        <button type="button" class="icon-btn" id="shPrevBtn" aria-label="이전 차시">◂</button>
-        <select id="shRoundSelect" class="round-select">${roundOptionsHtml(ui.shRound)}</select>
-        <button type="button" class="icon-btn" id="shNextBtn" aria-label="다음 차시">▸</button>
-        <input type="number" step="0.01" id="shRoundInput" placeholder="기록(초)" value="${shCurVal}">
+        <button type="button" class="icon-btn" id="shPrevBtn" aria-label="이전 차시" ${lock}>◂</button>
+        <select id="shRoundSelect" class="round-select" ${lock}>${roundOptionsHtml(ui.shRound)}</select>
+        <button type="button" class="icon-btn" id="shNextBtn" aria-label="다음 차시" ${lock}>▸</button>
+        <input type="number" step="0.01" id="shRoundInput" placeholder="기록(초)" value="${shCurVal}" ${lock}>
         <span id="shScoreBadge">${scoreBadgeHtml(shCurScore, !row.gender)}</span>
       </div>
+      <div class="stopwatch">
+        <div class="sw-title">${ui.shRound}차 초시계 — 정지하면 이 차시에 자동 저장됩니다</div>
+        <div class="sw-display"><span id="swDisplay">${swText}</span><small>초</small></div>
+        <div class="sw-buttons">
+          <button type="button" class="sw-main ${sw.running ? "running" : ""}" id="swToggleBtn">${sw.running ? "■ 정지 · 기록 저장" : "▶ 시작"}</button>
+          <button type="button" class="sw-reset" id="swResetBtn">${sw.running ? "취소" : "초기화"}</button>
+        </div>
+        <div class="sw-msg" id="swMsg">${swMsg}</div>
+      </div>
       <div class="round-actions">
-        <button type="button" class="small danger-ghost" id="shRoundResetBtn">이 차시 초기화</button>
+        <button type="button" class="small danger-ghost" id="shRoundResetBtn" ${lock}>이 차시 초기화</button>
       </div>
       <div class="rounds-summary" id="shRoundsSummary">${roundChipsHtml(row.sh, row.gender, false)}</div>
       <div class="best-row" id="shBestRow">
@@ -453,8 +534,8 @@ function renderPanel(){
     </div>
 
     <div class="panel-actions">
-      <button class="danger-ghost" id="deleteBtn">학생 삭제</button>
-      <button id="closeBtn">목록으로</button>
+      <button class="danger-ghost" id="deleteBtn" ${lock}>학생 삭제</button>
+      <button id="closeBtn" ${lock}>목록으로</button>
     </div>
   `;
   host.appendChild(panel);
@@ -512,6 +593,10 @@ function renderPanel(){
     renderPanel();
     scheduleSave();
   });
+  panel.querySelector("#swToggleBtn").addEventListener("click", () => {
+    if(sw.running) swStop(); else swStart(row, ui.shRound);
+  });
+  panel.querySelector("#swResetBtn").addEventListener("click", swReset);
   panel.querySelector("#jpRoundResetBtn").addEventListener("click", () => {
     row.jp[ui.jpRound] = "";
     renderPanel();
