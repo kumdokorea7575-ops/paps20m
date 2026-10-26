@@ -743,8 +743,30 @@ function hasRounds(rounds){
   return Object.values(rounds).some(v => v !== "" && v !== null && v !== undefined);
 }
 
+function parseImportLine(line){
+  if(line.indexOf("\t") !== -1) return line.split("\t");
+  const tokens = line.trim().split(/[\s,]+/).filter(Boolean);
+  const cells = [tokens[0] || "", "", "", "", ""];
+  let i = 1;
+  if(tokens[i] === "남" || tokens[i] === "여"){ cells[1] = tokens[i]; i++; }
+  const nums = [];
+  for(; i < tokens.length; i++){
+    if(/^\d{4}\.?$/.test(tokens[i])) break;
+    const n = parseFloat(tokens[i]);
+    if(isNaN(n)) break;
+    nums.push(n);
+  }
+  let k = 0;
+  if(k < nums.length && nums[k] < 100){
+    cells[2] = String(nums[k]); k++;
+    if(k < nums.length && nums[k] < 100) k++;
+  }
+  if(k < nums.length && nums[k] >= 100) cells[4] = String(nums[k]);
+  return cells;
+}
+
 function runSheetImport(){
-  const lines = document.getElementById("importText").value.split(/\r?\n/).map(l => l.split("\t"));
+  const lines = document.getElementById("importText").value.split(/\r?\n/).map(parseImportLine);
   const plan = [];
   const missing = [];
   let skipped = 0;
