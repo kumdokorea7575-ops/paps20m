@@ -170,7 +170,18 @@ html{overflow-x:hidden;width:100%;}
   <div class="toolbar">
     <span class="save-indicator"><span class="dot"></span><span id="saveText">저장됨</span></span>
     <button id="addBtn">학생 추가</button>
+    <button id="importBtn">시트에서 불러오기</button>
     <button class="danger-ghost" id="resetAllBtn">전체 기록 초기화</button>
+  </div>
+
+  <div class="panel" id="importBox" hidden>
+    <div style="font-size:15px;font-weight:600;margin-bottom:6px;">시트에서 기록 불러오기</div>
+    <div class="legend">구글시트에서 표(이름 ~ 합계)를 복사해 아래에 붙여넣으세요. 이미 기록이 있는 학생은 건드리지 않고, 시트의 최고기록은 1차에 들어갑니다.</div>
+    <textarea id="importText" rows="6" placeholder="여기에 붙여넣기 (Ctrl+V)" style="width:100%;margin-top:10px;font:inherit;font-size:14px;border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--input-bg);"></textarea>
+    <div class="panel-actions">
+      <button type="button" id="importCloseBtn">닫기</button>
+      <button type="button" class="primary" id="importRunBtn">불러오기</button>
+    </div>
   </div>
 
   <div class="roster" id="roster"></div>
@@ -250,6 +261,7 @@ function swReset(){
 
 function applySwLock(){
   document.getElementById("addBtn").disabled = sw.running;
+  document.getElementById("importBtn").disabled = sw.running;
   document.getElementById("resetAllBtn").disabled = sw.running;
 }
 
@@ -719,6 +731,67 @@ document.getElementById("addBtn").addEventListener("click", () => {
   render();
   scheduleSave();
 });
+
+function parseSheetNumber(v){
+  const t = String(v || "").trim().replace(/,/g, "");
+  if(t === "") return null;
+  const n = parseFloat(t);
+  return isNaN(n) ? null : n;
+}
+
+function hasRounds(rounds){
+  return Object.values(rounds).some(v => v !== "" && v !== null && v !== undefined);
+}
+
+function runSheetImport(){
+  const lines = document.getElementById("importText").value.split(/\r?\n/).map(l => l.split("\t"));
+  const plan = [];
+  const missing = [];
+  let skipped = 0;
+  lines.forEach(cells => {
+    const name = (cells[0] || "").trim();
+    if(!name || name === "이름") return;
+    const row = students.find(s => (s.name || "").trim() === name);
+    if(!row){ missing.push(name); return; }
+    const sheetGender = (cells[1] || "").trim();
+    const item = { row, gender: null, sh: null, jp: null };
+    if(!row.gender && (sheetGender === "남" || sheetGender === "여")) item.gender = sheetGender;
+    const sh = parseSheetNumber(cells[2]);
+    const jp = parseSheetNumber(cells[4]);
+    if(sh !== null){ if(hasRounds(row.sh)) skipped++; else item.sh = sh; }
+    if(jp !== null){ if(hasRounds(row.jp)) skipped++; else item.jp = jp; }
+    if(item.sh !== null || item.jp !== null || item.gender) plan.push(item);
+  });
+  const shCount = plan.filter(p => p.sh !== null).length;
+  const jpCount = plan.filter(p => p.jp !== null).length;
+  if(shCount === 0 && jpCount === 0){
+    alert("불러올 기록이 없습니다.\n(붙여넣은 표에 기록이 없거나, 이미 기록이 있거나, 이름이 맞지 않는 경우입니다.)" + (missing.length ? "\n이름 불일치: " + missing.join(", ") : ""));
+    return;
+  }
+  const msg = "왕복달리기 " + shCount + "명, 제자리멀리뛰기 " + jpCount + "명의 기록을 1차에 불러옵니다."
+    + (skipped ? "\n이미 기록이 있어 건너뛴 항목: " + skipped + "개" : "")
+    + (missing.length ? "\n이름이 맞지 않아 제외: " + missing.join(", ") : "")
+    + "\n\n불러올까요?";
+  if(!confirm(msg)) return;
+  plan.forEach(p => {
+    if(p.gender) p.row.gender = p.gender;
+    if(p.sh !== null) p.row.sh[1] = String(p.sh);
+    if(p.jp !== null) p.row.jp[1] = String(p.jp);
+  });
+  document.getElementById("importText").value = "";
+  document.getElementById("importBox").hidden = true;
+  render();
+  scheduleSave();
+}
+
+document.getElementById("importBtn").addEventListener("click", () => {
+  const box = document.getElementById("importBox");
+  box.hidden = !box.hidden;
+});
+document.getElementById("importCloseBtn").addEventListener("click", () => {
+  document.getElementById("importBox").hidden = true;
+});
+document.getElementById("importRunBtn").addEventListener("click", runSheetImport);
 
 document.getElementById("resetAllBtn").addEventListener("click", () => {
   if(confirm("모든 학생의 성별/기록을 초기화할까요? (이름은 유지됩니다)")){
