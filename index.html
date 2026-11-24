@@ -429,7 +429,7 @@ function statusOf(row){
 
 function totalValueHtml(total){
   if(total === null) return "<span>-</span>";
-  if(total === 80) return '<span class="perfect-pill">★ 만점 80 / 80점</span>';
+  if(total === 80) return '<span class="perfect-pill">★ 80 / 80점</span>';
   return "<span>" + total + " / 80점</span>";
 }
 
@@ -450,7 +450,7 @@ function renderRoster(){
     const perfect = status === "done" && total === 80;
     card.className = "roster-card" + (row.gender === "여" ? " female" : "") + (perfect ? " perfect" : "") + (row.id === selectedId ? " selected" : "");
     let badgeHtml = "";
-    if(perfect) badgeHtml = '<span class="badge badge-perfect">★ 만점 80점</span>';
+    if(perfect) badgeHtml = '<span class="badge badge-perfect">★ ' + total + '점</span>';
     else if(status === "done") badgeHtml = '<span class="badge badge-done">완료 ' + total + '점</span>';
     else if(status === "partial") badgeHtml = '<span class="badge badge-partial">입력중</span>';
     else badgeHtml = '<span class="badge badge-empty">미실시</span>';
