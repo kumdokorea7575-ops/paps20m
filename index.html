@@ -89,6 +89,9 @@ html{overflow-x:hidden;width:100%;}
     padding:3px 9px;border-radius:10px;border:1px solid transparent;
   }
   .badge-done{background:var(--green-bg);color:var(--green-text);border-color:var(--green-border);}
+  .badge-perfect{background:#EEE7FB;color:#5B2BB5;border-color:#C9B5F0;font-weight:700;}
+  .roster-card.perfect{border-color:#B79AE8;box-shadow:0 0 0 2px rgba(110,64,200,0.18);}
+  .total-line .perfect-pill{background:#EEE7FB;color:#5B2BB5;border:1px solid #C9B5F0;border-radius:10px;padding:4px 12px;font-weight:700;}
   .badge-partial{background:var(--amber-bg);color:var(--amber-text);border-color:var(--amber-border);}
   .badge-empty{background:var(--gray-bg);color:var(--gray-text);}
   .panel{
@@ -424,6 +427,12 @@ function statusOf(row){
   return "empty";
 }
 
+function totalValueHtml(total){
+  if(total === null) return "<span>-</span>";
+  if(total === 80) return '<span class="perfect-pill">★ 만점 80 / 80점</span>';
+  return "<span>" + total + " / 80점</span>";
+}
+
 function scoreBadgeHtml(score, genderMissing){
   if(genderMissing) return '<span class="round-score score-empty">성별 선택 필요</span>';
   if(score === null) return '<span class="round-score score-empty">-</span>';
@@ -438,9 +447,11 @@ function renderRoster(){
     const status = statusOf(row);
     const { total } = computeSummary(row);
     const card = document.createElement("div");
-    card.className = "roster-card" + (row.gender === "여" ? " female" : "") + (row.id === selectedId ? " selected" : "");
+    const perfect = status === "done" && total === 80;
+    card.className = "roster-card" + (row.gender === "여" ? " female" : "") + (perfect ? " perfect" : "") + (row.id === selectedId ? " selected" : "");
     let badgeHtml = "";
-    if(status === "done") badgeHtml = '<span class="badge badge-done">완료 ' + total + '점</span>';
+    if(perfect) badgeHtml = '<span class="badge badge-perfect">★ 만점 80점</span>';
+    else if(status === "done") badgeHtml = '<span class="badge badge-done">완료 ' + total + '점</span>';
     else if(status === "partial") badgeHtml = '<span class="badge badge-partial">입력중</span>';
     else badgeHtml = '<span class="badge badge-empty">미실시</span>';
     card.innerHTML = `
@@ -513,7 +524,7 @@ function refreshPanelComputed(){
   if(jpBestRow) jpBestRow.innerHTML = `<span>최고기록: ${summary.jpBest !== null ? summary.jpBest + "cm" : "-"}</span>${scoreBadgeHtml(summary.jpScore, !row.gender)}`;
 
   const totalLine = document.getElementById("totalLine");
-  if(totalLine) totalLine.innerHTML = `<span>합계</span><span>${summary.total !== null ? summary.total + " / 80점" : "-"}</span>`;
+  if(totalLine) totalLine.innerHTML = `<span>합계</span>${totalValueHtml(summary.total)}`;
 
   const genderHint = document.getElementById("genderHint");
   if(genderHint){
@@ -607,7 +618,7 @@ function renderPanel(){
 
     <div class="total-line" id="totalLine">
       <span>합계</span>
-      <span>${summary.total !== null ? summary.total + " / 80점" : "-"}</span>
+      ${totalValueHtml(summary.total)}
     </div>
 
     <div class="panel-actions">
