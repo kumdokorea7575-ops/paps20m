@@ -163,7 +163,7 @@ html{overflow-x:hidden;width:100%;}
 <div class="wrap">
   <div class="titlebar">
     <h1>수행평가 자동채점 — 20m 왕복달리기 · 제자리멀리뛰기</h1>
-    <p>학생 이름을 탭하면 입력 패널이 열립니다. 각 종목은 1차~10차까지 회차를 선택해 기록을 입력할 수 있고, 입력 즉시 그 회차의 배점이 표시됩니다. 잘못 입력했다면 "이 차시 초기화"로 해당 회차만 지울 수 있습니다. 모든 회차 중 가장 좋은 기록이 최종 배점으로 자동 반영됩니다. 기록은 지금 사용 중인 이 기기·브라우저에만 저장되며 다른 선생님과 공유되지 않습니다.</p>
+    <p>학생 이름을 탭하면 입력 패널이 열립니다. 각 종목은 1차~10차까지 회차를 선택해 기록을 입력할 수 있고, 입력 즉시 그 회차의 배점이 표시됩니다. 잘못 입력했다면 "이 차시 초기화"로 해당 회차만 지울 수 있습니다. 모든 회차 중 가장 좋은 기록이 최종 배점으로 자동 반영됩니다. 입력한 기록은 이 기기에 저장되고 구글시트와 자동으로 연동되어, 컴퓨터를 포함한 다른 기기에서도 같은 점수를 볼 수 있습니다.</p>
   </div>
 
   <div id="inAppWarn" hidden style="background:var(--amber-bg);color:var(--amber-text);border:1px solid var(--amber-border);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;line-height:1.6;">
@@ -172,6 +172,7 @@ html{overflow-x:hidden;width:100%;}
 
   <div class="toolbar">
     <span class="save-indicator"><span class="dot"></span><span id="saveText">저장됨</span></span>
+    <span class="save-indicator" id="syncBtn" role="button" tabindex="0" style="cursor:pointer;" title="누르면 지금 시트와 동기화합니다"><span class="dot" id="syncDot" style="background:var(--text-mute);"></span><span id="syncText">시트 확인 중…</span></span>
     <button id="addBtn">학생 추가</button>
     <button id="importBtn">시트에서 불러오기</button>
     <button class="danger-ghost" id="resetAllBtn">전체 기록 초기화</button>
@@ -191,7 +192,7 @@ html{overflow-x:hidden;width:100%;}
 
   <div id="panelHost"></div>
 
-  <div class="footer-note">이 페이지의 기록은 각자의 브라우저/계정에만 저장됩니다. 파일을 그대로 복사해 사용해도 서로의 입력 내용은 섞이지 않습니다.</div>
+  <div class="footer-note">기록은 구글시트와 연동되어 몇십 초 안에 다른 기기에도 반영됩니다. 위쪽 "시트 연동됨" 표시를 누르면 바로 동기화합니다.</div>
 </div>
 
 <script>
@@ -212,9 +213,67 @@ let selectedId = null;
 let uiState = {};
 let saveTimer = null;
 let dirty = false;
-let syncPending = false;
+
+const OUTBOX_KEY = "paps_20m_outbox_v1";
+let outbox = [];
+let opSeq = 0;
+let lastT = 0;
+let clockSkew = 0;
 let syncInFlight = false;
-let syncVersion = 0;
+let syncAgain = false;
+let syncState = "idle";
+let lastSyncAt = 0;
+let pendingRender = false;
+let retryTimer = null;
+let chain = 0;
+
+function nowTs(){
+  lastT = Math.max(Date.now() + clockSkew, lastT + 1);
+  return lastT;
+}
+
+function saveOutbox(){
+  try{ localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox)); }catch(err){}
+}
+
+function loadSyncState(){
+  try{
+    const o = JSON.parse(localStorage.getItem(OUTBOX_KEY) || "[]");
+    if(Array.isArray(o)) outbox = o.filter(x => x && x.ev);
+  }catch(err){ outbox = []; }
+  outbox.forEach(o => { opSeq = Math.max(opSeq, o.q || 0); });
+}
+
+function enqueueOp(row, ev, r, v, t){
+  const key = row.id + "|" + ev + "|" + (r || 0);
+  outbox = outbox.filter(o => o.key !== key);
+  outbox.push({ key, rid: row.id, ev, r: r || 0, v, t, q: ++opSeq });
+  saveOutbox();
+}
+
+function enqueueDelete(name){
+  outbox = outbox.filter(o => !(o.ev === "del" && o.name === name));
+  outbox.push({ key: "del|" + name, ev: "del", name, r: 0, v: "", t: nowTs(), q: ++opSeq });
+  saveOutbox();
+}
+
+function setCell(row, ev, round, value){
+  row[ev][round] = value;
+  const t = nowTs();
+  row.t = row.t || {};
+  row.t[ev + round] = t;
+  enqueueOp(row, ev, round, value, t);
+  scheduleSave();
+}
+
+function setGender(row, g){
+  row.gender = g;
+  const t = nowTs();
+  row.t = row.t || {};
+  row.t.g = t;
+  enqueueOp(row, "g", 0, g, t);
+  scheduleSave();
+}
 
 const sw = { running:false, startTs:0, elapsed:0, targetId:null, targetRound:1, msg:"", raf:0 };
 
@@ -250,8 +309,7 @@ function swStop(){
     if(hasPrev && !confirm(sw.targetRound + "차에 이미 " + prev + "초가 입력되어 있습니다.\n" + secs + "초로 덮어쓸까요?")){
       sw.msg = "저장하지 않았습니다 (" + secs + "초)";
     } else {
-      row.sh[sw.targetRound] = secs;
-      scheduleSave();
+      setCell(row, "sh", sw.targetRound, secs);
       sw.msg = sw.targetRound + "차 " + secs + "초 저장됨";
     }
   }
@@ -281,7 +339,7 @@ function emptyRounds(){
 
 function defaultStudents(){
   return DEFAULT_NAMES.map(name => ({
-    id: uid(), name, gender: FEMALE_NAMES.has(name) ? "여" : "남", sh: emptyRounds(), jp: emptyRounds()
+    id: uid(), name, gender: FEMALE_NAMES.has(name) ? "여" : "남", sh: emptyRounds(), jp: emptyRounds(), t: {}
   }));
 }
 
@@ -572,10 +630,24 @@ function renderPanel(){
     renderRoster();
     scheduleSave();
   });
-  panel.querySelector("#genderInput").addEventListener("change", e => {
-    row.gender = e.target.value;
-    refreshPanelComputed();
+  panel.querySelector("#nameInput").addEventListener("change", () => {
+    const newName = (row.name || "").trim();
+    const oldName = row.srvName;
+    if(oldName && oldName !== newName){
+      enqueueDelete(oldName);
+      row.srvName = null;
+      ["sh", "jp"].forEach(ev => {
+        for(let r = 1; r <= 10; r++){
+          if(row[ev][r] !== "" && row[ev][r] !== undefined) setCell(row, ev, r, row[ev][r]);
+        }
+      });
+      if(row.gender) setGender(row, row.gender);
+    }
     scheduleSave();
+  });
+  panel.querySelector("#genderInput").addEventListener("change", e => {
+    setGender(row, e.target.value);
+    refreshPanelComputed();
   });
   panel.querySelector("#shRoundSelect").addEventListener("change", e => {
     ui.shRound = parseInt(e.target.value, 10);
@@ -598,28 +670,24 @@ function renderPanel(){
     ui.jpRound = clampRound(ui.jpRound + 1); renderPanel();
   });
   panel.querySelector("#shRoundInput").addEventListener("input", e => {
-    row.sh[ui.shRound] = e.target.value;
+    setCell(row, "sh", ui.shRound, e.target.value);
     refreshPanelComputed();
-    scheduleSave();
   });
   panel.querySelector("#jpRoundInput").addEventListener("input", e => {
-    row.jp[ui.jpRound] = e.target.value;
+    setCell(row, "jp", ui.jpRound, e.target.value);
     refreshPanelComputed();
-    scheduleSave();
   });
   panel.querySelector("#shRoundResetBtn").addEventListener("click", () => {
-    row.sh[ui.shRound] = "";
+    setCell(row, "sh", ui.shRound, "");
     renderPanel();
-    scheduleSave();
   });
   panel.querySelector("#swToggleBtn").addEventListener("click", () => {
     if(sw.running) swStop(); else swStart(row, ui.shRound);
   });
   panel.querySelector("#swResetBtn").addEventListener("click", swReset);
   panel.querySelector("#jpRoundResetBtn").addEventListener("click", () => {
-    row.jp[ui.jpRound] = "";
+    setCell(row, "jp", ui.jpRound, "");
     renderPanel();
-    scheduleSave();
   });
   panel.querySelector("#closeBtn").addEventListener("click", () => {
     selectedId = null;
@@ -627,7 +695,11 @@ function renderPanel(){
     renderRoster();
   });
   panel.querySelector("#deleteBtn").addEventListener("click", () => {
-    if(confirm(`"${row.name || "이름없음"}" 학생을 삭제할까요?`)){
+    if(confirm(`"${row.name || "이름없음"}" 학생을 삭제할까요?\n구글시트의 이 학생 기록도 함께 삭제됩니다.`)){
+      const delName = (row.name || "").trim();
+      outbox = outbox.filter(o => o.rid !== row.id);
+      if(delName) enqueueDelete(delName);
+      saveOutbox();
       students = students.filter(s => s.id !== row.id);
       delete uiState[row.id];
       selectedId = null;
@@ -643,47 +715,194 @@ function render(){
   renderPanel();
 }
 
-const SYNCED_KEY = "paps_20m_synced_ids_v1";
-
 function hasAnyRecord(row){
   const filled = v => v !== "" && v !== null && v !== undefined;
   return Object.values(row.sh).some(filled) || Object.values(row.jp).some(filled);
 }
 
-function loadSyncedIds(){
-  try{ return new Set(JSON.parse(localStorage.getItem(SYNCED_KEY) || "[]")); }
-  catch(err){ return new Set(); }
+function editingNow(){
+  if(sw.running) return true;
+  const a = document.activeElement;
+  return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
 }
 
-function syncToSheet(){
-  if(!SHEET_WEBHOOK_URL){ syncPending = false; return; }
-  if(syncInFlight) return;
-  try{
-    const synced = loadSyncedIds();
-    const targets = students.filter(row => hasAnyRecord(row) || synced.has(row.id));
-    if(targets.length === 0){ syncPending = false; return; }
-    targets.forEach(row => { if(hasAnyRecord(row)) synced.add(row.id); });
-    try{ localStorage.setItem(SYNCED_KEY, JSON.stringify([...synced])); }catch(err){}
-    const rows = targets.map(row => {
-      const s = computeSummary(row);
-      return {
-        name: row.name, gender: row.gender,
-        shBest: s.shBest !== null ? Number(s.shBest.toFixed(2)) : null,
-        shScore: s.shScore, jpBest: s.jpBest, jpScore: s.jpScore, total: s.total
-      };
+function persistLocal(){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(students)); }catch(err){}
+}
+
+function showSyncState(){
+  const el = document.getElementById("syncText");
+  const dot = document.getElementById("syncDot");
+  if(!el) return;
+  const n = outbox.length;
+  let text = "";
+  let color = "var(--green-text)";
+  if(!SHEET_WEBHOOK_URL){ text = ""; }
+  else if(syncState === "old"){ text = "시트 서버 업데이트 필요" + (n ? " (대기 " + n + "건)" : ""); color = "var(--red-text)"; }
+  else if(syncState === "error"){ text = "시트 연결 안 됨" + (n ? " (대기 " + n + "건)" : "") + " · 누르면 재시도"; color = "var(--amber-text)"; }
+  else if(syncInFlight || n){ text = "시트 전송 중" + (n ? " (" + n + "건)" : "") + "…"; color = "var(--amber-text)"; }
+  else if(lastSyncAt){
+    const d = new Date(lastSyncAt);
+    text = "시트 연동됨 · " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  else { text = "시트 확인 중…"; color = "var(--text-mute)"; }
+  el.textContent = text;
+  if(dot) dot.style.background = color;
+}
+
+function mergeFromServer(list){
+  if(!Array.isArray(list)) return false;
+  let changed = false;
+  const pending = new Set(outbox.map(o => o.rid + "|" + o.ev + "|" + o.r));
+  const byName = new Map();
+  students.forEach(s => { const n = (s.name || "").trim(); if(n && !byName.has(n)) byName.set(n, s); });
+  list.forEach(sv0 => {
+    let sv = sv0;
+    const name = String((sv && sv.name) || "").trim();
+    if(!name) return;
+    let row = byName.get(name);
+    if(sv.del && !sv.sh){
+      if(!row) return;
+      const lastLocal = Math.max(0, ...Object.values(row.t || {}));
+      const hasOps = outbox.some(o => o.rid === row.id);
+      if(lastLocal <= sv.del && !hasOps){
+        students = students.filter(s => s !== row);
+        byName.delete(name);
+        delete uiState[row.id];
+        if(selectedId === row.id) selectedId = null;
+        changed = true;
+        return;
+      }
+      sv = { name, g: "", gt: 0, sh: {}, jp: {}, del: sv.del };
+    }
+    if(!row){
+      row = { id: uid(), name, gender: sv.g || "", sh: emptyRounds(), jp: emptyRounds(), t: {} };
+      students.push(row);
+      byName.set(name, row);
+      changed = true;
+    }
+    row.srvName = name;
+    row.t = row.t || {};
+    if(!pending.has(row.id + "|g|0")){
+      const gt = sv.gt || 0;
+      const lg = row.t.g || 0;
+      if(sv.g && gt >= lg){
+        if(row.gender !== sv.g){ row.gender = sv.g; changed = true; }
+        row.t.g = gt;
+      } else if(row.gender && lg > gt){
+        enqueueOp(row, "g", 0, row.gender, lg);
+      }
+    }
+    ["sh", "jp"].forEach(ev => {
+      for(let r = 1; r <= 10; r++){
+        if(pending.has(row.id + "|" + ev + "|" + r)) continue;
+        const key = ev + r;
+        const cell = sv[ev] && sv[ev][r];
+        const localV = row[ev][r] === undefined || row[ev][r] === null ? "" : String(row[ev][r]);
+        let lt = row.t[key] || 0;
+        if(cell){
+          const v = String(cell[0]);
+          const t = Number(cell[1]) || 0;
+          if(t >= lt){
+            if(v !== localV){ row[ev][r] = v; changed = true; }
+            row.t[key] = t;
+          } else if(v !== localV){
+            enqueueOp(row, ev, r, localV, lt);
+          }
+        } else if(localV !== ""){
+          if(sv.del && lt <= sv.del){
+            row[ev][r] = "";
+            delete row.t[key];
+            changed = true;
+          } else {
+            if(lt === 0){ lt = 1; row.t[key] = 1; }
+            enqueueOp(row, ev, r, localV, lt);
+          }
+        }
+      }
     });
-    const version = syncVersion;
-    syncInFlight = true;
-    fetch(SHEET_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ rows })
-    }).then(r => {
-      if(r && r.ok && version === syncVersion) syncPending = false;
-      syncInFlight = false;
-      if(syncPending && version !== syncVersion) syncToSheet();
-    }).catch(() => { syncInFlight = false; });
-  }catch(err){ syncInFlight = false; }
+  });
+  return changed;
+}
+
+function softRender(){
+  if(editingNow()){ pendingRender = true; return; }
+  pendingRender = false;
+  render();
+}
+
+async function syncNow(){
+  if(!SHEET_WEBHOOK_URL) return;
+  if(syncInFlight){ syncAgain = true; return; }
+  clearTimeout(retryTimer);
+  syncInFlight = true;
+  syncAgain = false;
+  showSyncState();
+  const sentQ = new Set();
+  const ops = [];
+  outbox.forEach(o => {
+    let name;
+    let row = null;
+    if(o.ev === "del"){ name = o.name; }
+    else {
+      row = students.find(s => s.id === o.rid);
+      if(!row) return;
+      name = (row.name || "").trim();
+    }
+    if(!name) return;
+    const op = { name, ev: o.ev, t: o.t };
+    if(o.ev === "sh" || o.ev === "jp"){ op.r = o.r; op.v = o.v; if(row && row.gender) op.g = row.gender; }
+    else if(o.ev === "g"){ op.v = o.v; }
+    ops.push(op);
+    sentQ.add(o.q);
+  });
+  try{
+    let res;
+    if(ops.length){
+      res = await fetch(SHEET_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ ops })
+      });
+    } else {
+      res = await fetch(SHEET_WEBHOOK_URL + (SHEET_WEBHOOK_URL.indexOf("?") === -1 ? "?" : "&") + "t=" + Date.now(), { cache: "no-store" });
+    }
+    const data = await res.json();
+    if(!data || data.ok !== true || !Array.isArray(data.students)){
+      syncState = data && data.error === "busy" ? "error" : "old";
+      throw new Error("bad response");
+    }
+    if(typeof data.now === "number") clockSkew = data.now - Date.now();
+    outbox = outbox.filter(o => !sentQ.has(o.q));
+    ops.forEach(op => { if(op.ev === "del") return; const row = students.find(s => (s.name || "").trim() === op.name); if(row) row.srvName = op.name; });
+    saveOutbox();
+    const changed = mergeFromServer(data.students);
+    persistLocal();
+    syncState = "ok";
+    lastSyncAt = Date.now();
+    if(changed){ softRender(); const ind = document.getElementById("saveText"); if(ind) ind.textContent = savedLabel(); }
+  }catch(err){
+    if(syncState !== "old") syncState = "error";
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(syncNow, syncState === "old" ? 60000 : 8000);
+  }
+  syncInFlight = false;
+  showSyncState();
+  if(syncState === "ok" && (syncAgain || hasSendable()) && chain < 3){
+    chain++;
+    syncAgain = false;
+    setTimeout(syncNow, 400);
+  } else if(syncState === "ok"){
+    chain = 0;
+  }
+}
+
+function hasSendable(){
+  return outbox.some(o => {
+    if(o.ev === "del") return !!o.name;
+    const row = students.find(s => s.id === o.rid);
+    return !!(row && (row.name || "").trim());
+  });
 }
 
 function savedLabel(){
@@ -697,16 +916,24 @@ function flushSave(){
     try{
       localStorage.setItem(STORAGE_KEY, JSON.stringify(students));
       dirty = false;
-      syncPending = true;
-      syncVersion++;
       if(indicator) indicator.textContent = savedLabel();
     }catch(err){
       if(indicator) indicator.textContent = "저장 실패";
       return;
     }
   }
-  if(syncPending) syncToSheet();
+  if(hasSendable()) syncNow(); else showSyncState();
 }
+
+function pullTick(){
+  if(document.visibilityState === "hidden") return;
+  if(editingNow()) return;
+  syncNow();
+}
+setInterval(pullTick, 20000);
+document.addEventListener("focusout", () => {
+  setTimeout(() => { if(pendingRender && !editingNow()){ pendingRender = false; render(); } }, 300);
+});
 
 function scheduleSave(){
   const indicator = document.getElementById("saveText");
@@ -742,6 +969,7 @@ document.addEventListener("visibilitychange", () => {
     flushSave();
   }else{
     reloadFromStorage();
+    pullTick();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -755,6 +983,7 @@ function normalizeStudents(list){
   list.forEach(s => {
     if(!s.sh) s.sh = emptyRounds();
     if(!s.jp) s.jp = emptyRounds();
+    if(!s.t) s.t = {};
     if(!s.gender && DEFAULT_NAMES.includes(s.name)){
       s.gender = FEMALE_NAMES.has(s.name) ? "여" : "남";
     }
@@ -763,6 +992,7 @@ function normalizeStudents(list){
 }
 
 function loadData(){
+  loadSyncState();
   let raw = null;
   try{
     raw = localStorage.getItem(STORAGE_KEY);
@@ -781,10 +1011,12 @@ function loadData(){
   const indicator = document.getElementById("saveText");
   if(indicator) indicator.textContent = savedLabel();
   try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(err){}
+  showSyncState();
+  syncNow();
 }
 
 document.getElementById("addBtn").addEventListener("click", () => {
-  const row = { id: uid(), name: "", gender: "", sh: emptyRounds(), jp: emptyRounds() };
+  const row = { id: uid(), name: "", gender: "", sh: emptyRounds(), jp: emptyRounds(), t: {} };
   students.push(row);
   selectedId = row.id;
   render();
@@ -855,14 +1087,13 @@ function runSheetImport(){
     + "\n\n불러올까요?";
   if(!confirm(msg)) return;
   plan.forEach(p => {
-    if(p.gender) p.row.gender = p.gender;
-    if(p.sh !== null) p.row.sh[1] = String(p.sh);
-    if(p.jp !== null) p.row.jp[1] = String(p.jp);
+    if(p.gender) setGender(p.row, p.gender);
+    if(p.sh !== null) setCell(p.row, "sh", 1, String(p.sh));
+    if(p.jp !== null) setCell(p.row, "jp", 1, String(p.jp));
   });
   document.getElementById("importText").value = "";
   document.getElementById("importBox").hidden = true;
   render();
-  scheduleSave();
 }
 
 document.getElementById("importBtn").addEventListener("click", () => {
@@ -877,10 +1108,16 @@ document.getElementById("importRunBtn").addEventListener("click", runSheetImport
 document.getElementById("resetAllBtn").addEventListener("click", () => {
   const recorded = students.filter(hasAnyRecord).length;
   const warn = recorded > 0
-    ? "기록이 있는 " + recorded + "명을 포함해 모든 학생의 성별/기록을 초기화합니다.\n구글시트에도 빈 값으로 반영되며 되돌릴 수 없습니다.\n\n정말 초기화할까요?"
-    : "모든 학생의 성별/기록을 초기화할까요? (이름은 유지됩니다)";
+    ? "기록이 있는 " + recorded + "명의 모든 기록을 지웁니다. (이름·성별은 유지됩니다)\n다른 기기와 구글시트에도 빈 값으로 반영되며 되돌릴 수 없습니다.\n\n정말 초기화할까요?"
+    : "모든 학생의 기록을 초기화할까요? (이름·성별은 유지됩니다)";
   if(confirm(warn)){
-    students = students.map(r => ({ id: r.id, name: r.name, gender: "", sh: emptyRounds(), jp: emptyRounds() }));
+    students.forEach(r => {
+      ["sh", "jp"].forEach(ev => {
+        for(let n = 1; n <= 10; n++){
+          if(r[ev][n] !== "" && r[ev][n] !== undefined) setCell(r, ev, n, "");
+        }
+      });
+    });
     uiState = {};
     render();
     scheduleSave();
@@ -904,6 +1141,8 @@ function checkRestoreLink(){
 if(/KAKAOTALK|NAVER\(|Instagram|FBAN|FBAV|DaumApps|Line\//i.test(navigator.userAgent)){
   document.getElementById("inAppWarn").hidden = false;
 }
+
+document.getElementById("syncBtn").addEventListener("click", () => { chain = 0; syncNow(); });
 
 loadData();
 checkRestoreLink();
